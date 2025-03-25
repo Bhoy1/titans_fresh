@@ -120,7 +120,7 @@ def create_vit_with_memory(
                   if k not in ['memory_depth', 'expansion_factor', 'momentum', 'momentum_factor',
                              'forget_factor', 'chunk_size', 'momentum_order', 'qk_rmsnorm',
                              'use_accelerated_scan', 'memory_interval', 'num_persist_mem_tokens', 
-                             'num_longterm_mem_tokens']}
+                             'num_longterm_mem_tokens', 'qkv_receives_diff_views']}
     
     # Create base model
     if model_size == "tiny":
@@ -164,13 +164,12 @@ def create_vit_with_memory(
     
     # Add differentiated views flag for advanced memory
     if memory_type == "advanced":
-        memory_kwargs['qkv_receives_diff_views'] = qkv_receives_diff_views
+        pass
     
     memory_module = create_memory_module(
         memory_type=memory_type,
         embed_dim=embed_dim,  # Now using the embed_dim from the base model
         integration_type=approach,
-        qkv_receives_diff_views=qkv_receives_diff_views,
         **memory_kwargs
     )
 

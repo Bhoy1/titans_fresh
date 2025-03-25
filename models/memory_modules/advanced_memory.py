@@ -79,7 +79,8 @@ class AdvancedNeuralMemory(nn.Module):
         qkv_receives_diff_views: bool = True,  # Allow different views for QKV
         integration_type: str = "mal",  # "mal", "mac", or "mag"
         use_accelerated_scan: bool = False,  # Whether to use accelerated scan
-        per_head_learned_parameters: bool = True
+        per_head_learned_parameters: bool = True,
+        heads: int = 1  # Add heads parameter with a default
     ):
         """
         Initialize the advanced neural memory module.
@@ -107,6 +108,7 @@ class AdvancedNeuralMemory(nn.Module):
         self.qk_rmsnorm = qk_rmsnorm
         self.qkv_receives_diff_views = qkv_receives_diff_views
         self.per_head_learned_parameters = per_head_learned_parameters
+        self.heads = heads
         
         # Create dimension mapping layers
         self.down_proj = nn.Linear(dim, self.memory_dim)
