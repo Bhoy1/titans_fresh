@@ -181,16 +181,63 @@ def get_ants_bees_loaders(
     Returns:
         Tuple of (train_loader, test_loader)
     """
-    # If no data path provided, use the default from kagglehub
+    # If no data path provided, download or use a manually specified path
     if data_path is None:
         try:
-            import kagglehub
-            data_path = kagglehub.dataset_download("gauravduttakiit/ants-bees")
-            print(f"Using downloaded dataset at: {data_path}")
-        except (ImportError, Exception) as e:
-            raise ValueError(f"Could not download dataset automatically: {e}. Please provide data_path.")
-        
-    # Define transformations for 224x224 images
+            # Try PyTorch's built-in dataset first (more reliable structure)
+            import os
+            import urllib.request
+            import zipfile
+            
+            # Create data directory if it doesn't exist
+            os.makedirs("./data", exist_ok=True)
+            data_path = "./data/hymenoptera_data"
+            
+            # Download the data if it doesn't exist
+            if not os.path.exists(data_path):
+                print("Downloading Hymenoptera dataset from PyTorch...")
+                url = "https://download.pytorch.org/tutorial/hymenoptera_data.zip"
+                zip_path = "./data/hymenoptera_data.zip"
+                
+                # Download the zip file
+                urllib.request.urlretrieve(url, zip_path)
+                
+                # Extract the zip file
+                with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+                    zip_ref.extractall("./data")
+                
+                # Remove the zip file
+                os.remove(zip_path)
+                
+                print(f"Dataset downloaded and extracted to {data_path}")
+        except Exception as e:
+            print(f"Error downloading dataset: {e}")
+            print("Trying Kaggle dataset as fallback...")
+            
+            try:
+                import kagglehub
+                download_path = kagglehub.dataset_download("gauravduttakiit/ants-bees")
+                print(f"Downloaded dataset to: {download_path}")
+                
+                # Look for the correct structure
+                import os
+                for root, dirs, files in os.walk(download_path):
+                    if "hymenoptera_data" in dirs:
+                        data_path = os.path.join(root, "hymenoptera_data")
+                        print(f"Found hymenoptera_data directory at: {data_path}")
+                        break
+                    elif "train" in dirs and "val" in dirs:
+                        data_path = root
+                        print(f"Found train and val directories at: {data_path}")
+                        break
+                else:
+                    # If we didn't find the right structure, use a default path
+                    print("Could not find expected directory structure in downloaded dataset.")
+                    raise ValueError("Dataset structure not found")
+            except Exception as nested_e:
+                raise ValueError(f"Could not download dataset: {nested_e}. Please provide data_path.")
+    
+    # Define transformations for images
     train_transform = transforms.Compose([
         transforms.Resize((img_size, img_size)),
         transforms.RandomHorizontalFlip(),
@@ -205,10 +252,14 @@ def get_ants_bees_loaders(
         transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
     ])
     
-    # Load datasets
-    train_path = f"{data_path}/train"
-    val_path = f"{data_path}/val"
+    # Get train and val paths
+    train_path = os.path.join(data_path, "train")
+    val_path = os.path.join(data_path, "val")
     
+    if not os.path.exists(train_path) or not os.path.exists(val_path):
+        raise ValueError(f"Could not find train and val directories in {data_path}.")
+    
+    # Load datasets
     train_set = torchvision.datasets.ImageFolder(
         root=train_path, transform=train_transform
     )

@@ -151,6 +151,9 @@ def create_vit_with_memory(
     if memory_type == "none":
         return base_model
     
+    # Get embedding dimension from the base model
+    embed_dim = base_model.embed_dim
+    
     # Create memory module (pass only memory-relevant parameters)
     memory_kwargs = {
         k: v for k, v in kwargs.items() 
@@ -165,7 +168,7 @@ def create_vit_with_memory(
     
     memory_module = create_memory_module(
         memory_type=memory_type,
-        embed_dim=embed_dim,
+        embed_dim=embed_dim,  # Now using the embed_dim from the base model
         integration_type=approach,
         qkv_receives_diff_views=qkv_receives_diff_views,
         **memory_kwargs

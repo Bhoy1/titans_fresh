@@ -5,7 +5,7 @@ Default configurations for model training and evaluation.
 # Training configurations
 TRAINING_CONFIG = {
     # Basic training parameters
-    'batch_size': 128,
+    'batch_size': 256,
     'num_workers': 8,
     'epochs': 50,
     'learning_rate': 5e-5,
@@ -56,6 +56,9 @@ MODEL_CONFIGS = {
 
 # Memory module configurations
 MEMORY_CONFIGS = {
+    'none': {
+        # Empty config for baseline model without memory
+    },
     'mlp': {
         'memory_depth': 2,
         'expansion_factor': 4.0,
