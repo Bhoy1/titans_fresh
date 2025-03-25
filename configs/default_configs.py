@@ -12,7 +12,7 @@ TRAINING_CONFIG = {
     'weight_decay': 0.01,
     
     # Two-phase training
-    'unfreeze_epoch': 10,  # Epoch to unfreeze backbone
+    'unfreeze_epoch': 100,  # Epoch to unfreeze backbone
     
     # Model saving
     'save_dir': './checkpoints',

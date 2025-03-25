@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 """
-Simplified debug training script for ViT with Titans memory integration.
+Fast debug training script for ViT with Titans memory integration.
+Based on the faster quick_test.py approach.
 """
 
 import os
@@ -8,9 +9,8 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import time
-import numpy as np
-from tqdm import tqdm
 import argparse
+from datetime import datetime
 
 # Import model components
 from models.model_factory import create_vit_with_memory
@@ -25,9 +25,12 @@ from data.data_loading import (
     get_imagenet_loaders
 )
 
+# Import configurations
+from configs.default_configs import DATASET_CONFIGS, MEMORY_CONFIGS, INTEGRATION_CONFIGS
+
 def parse_args():
     """Parse command line arguments."""
-    parser = argparse.ArgumentParser(description='Debug Train Script for ViT with Titans Memory')
+    parser = argparse.ArgumentParser(description='Fast Debug Train Script for ViT with Titans Memory')
     
     # Dataset parameters
     parser.add_argument('--dataset', type=str, default='ants-bees',
@@ -59,69 +62,75 @@ def parse_args():
     parser.add_argument('--save-dir', type=str, default='./checkpoints',
                         help='Directory to save checkpoints')
     parser.add_argument('--debug', action='store_true',
-                        help='Enable debug mode with verbose logging')
+                        help='Enable more verbose debug logging')
     parser.add_argument('--no-gpu', action='store_true',
                         help='Disable GPU usage')
+    parser.add_argument('--num-workers', type=int, default=4,
+                        help='Number of worker threads for data loading')
     
     return parser.parse_args()
 
-def debug_batch(model, loader, device, criterion, batch_idx=0, phase="train"):
-    """Get detailed information about a single batch."""
-    batch_iter = iter(loader)
-    for _ in range(min(batch_idx, len(loader)-1)):
-        next(batch_iter)
-    
-    inputs, targets = next(batch_iter)
+def debug_batch(model, loader, device, criterion, phase="debug"):
+    """Debug a batch from the data loader."""
+    batch_data = next(iter(loader))
+    inputs, targets = batch_data
     inputs, targets = inputs.to(device), targets.to(device)
     
-    # Count per class
-    unique_targets, counts = torch.unique(targets, return_counts=True)
-    target_counts = {loader.dataset.classes[t.item()]: c.item() for t, c in zip(unique_targets, counts)}
+    # Get model predictions
+    model.eval()
+    with torch.no_grad():
+        outputs = model(inputs)
+        loss = criterion(outputs, targets)
+        _, predicted = outputs.max(1)
     
-    # Forward pass
-    outputs = model(inputs)
-    loss = criterion(outputs, targets)
+    # Calculate metrics
+    accuracy = 100 * predicted.eq(targets).sum().item() / targets.size(0)
     
-    # Get predictions
-    _, predicted = torch.max(outputs, 1)
-    correct = (predicted == targets).sum().item()
-    accuracy = 100 * correct / targets.size(0)
+    # Count class distribution in targets and predictions
+    target_counts = {}
+    pred_counts = {}
+    for c in loader.dataset.classes:
+        target_counts[c] = 0
+        pred_counts[c] = 0
     
-    # Count predictions per class
-    unique_preds, pred_counts = torch.unique(predicted, return_counts=True)
-    pred_class_counts = {loader.dataset.classes[p.item()]: c.item() for p, c in zip(unique_preds, pred_counts)}
+    for t in targets:
+        target_counts[loader.dataset.classes[t.item()]] += 1
     
-    # Get individual predictions
-    individual = [(loader.dataset.classes[t.item()], 
-                   loader.dataset.classes[p.item()], 
-                   "✓" if t == p else "✗") 
-                 for t, p in zip(targets[:min(8, len(targets))], 
-                                predicted[:min(8, len(predicted))])]
+    for p in predicted:
+        pred_counts[loader.dataset.classes[p.item()]] += 1
     
-    print(f"\n===== {phase.upper()} DEBUG INFO (Batch {batch_idx}) =====")
+    # Print debug info
+    print(f"\n===== {phase.upper()} DEBUG INFO =====")
     print(f"Batch size: {targets.size(0)}")
     print(f"Target distribution: {target_counts}")
-    print(f"Prediction distribution: {pred_class_counts}")
+    print(f"Prediction distribution: {pred_counts}")
     print(f"Loss: {loss.item():.4f}, Accuracy: {accuracy:.2f}%")
-    print("\nSample predictions (True, Predicted, Correct):")
-    for true_class, pred_class, correct_mark in individual:
-        print(f"  {true_class:10s} → {pred_class:10s} {correct_mark}")
-    print("="*50)
     
-    return accuracy, loss.item()
+    # Show individual predictions (up to 8 samples)
+    #print("Sample predictions (True -> Predicted, Correct?):")
+    #for i in range(min(8, targets.size(0))):
+    #    t = loader.dataset.classes[targets[i].item()]
+    #    p = loader.dataset.classes[predicted[i].item()]
+    #    correct = "✓" if predicted[i] == targets[i] else "✗"
+    #    print(f"  {t:8s} -> {p:8s} {correct}")
+    
+    #print("=" * 50)
+    
+    # Return to train mode if needed
+    model.train()
+    return accuracy
 
 def train_epoch(model, loader, criterion, optimizer, device, epoch):
-    """Train model for one epoch with detailed logging."""
+    """Train model for one epoch."""
     model.train()
     running_loss = 0.0
     correct = 0
     total = 0
     
-    # Analyze initial batch
-    print("\nAnalyzing first batch before training:")
-    debug_batch(model, loader, device, criterion, 0, "initial")
+    # Log only at specific intervals
+    log_interval = max(1, len(loader) // 4)
     
-    for batch_idx, (inputs, targets) in enumerate(tqdm(loader, desc=f"Epoch {epoch}")):
+    for batch_idx, (inputs, targets) in enumerate(loader):
         inputs, targets = inputs.to(device), targets.to(device)
         
         # Forward pass
@@ -140,15 +149,11 @@ def train_epoch(model, loader, criterion, optimizer, device, epoch):
         correct += batch_correct
         total += targets.size(0)
         
-        # Print batch statistics
-        if batch_idx % 5 == 0:
-            print(f"Batch {batch_idx}: Loss: {loss.item():.4f}, "
+        # Print batch statistics (limited to reduce overhead)
+        if batch_idx % log_interval == 0:
+            print(f"Epoch {epoch}, Batch {batch_idx}: Loss: {loss.item():.4f}, "
                   f"Batch Acc: {100 * batch_correct / targets.size(0):.2f}%, "
                   f"Running Acc: {100 * correct / total:.2f}%")
-            
-            # Debug a batch midway
-            if batch_idx > 0 and batch_idx % 10 == 0:
-                debug_batch(model, loader, device, criterion, batch_idx, "mid_train")
     
     return running_loss/len(loader), 100.*correct/total
 
@@ -159,8 +164,13 @@ def validate(model, loader, criterion, device):
     correct = 0
     total = 0
     
+    # Track class-wise metrics
+    num_classes = len(loader.dataset.classes)
+    class_correct = [0 for _ in range(num_classes)]
+    class_total = [0 for _ in range(num_classes)]
+    
     with torch.no_grad():
-        for batch_idx, (inputs, targets) in enumerate(tqdm(loader, desc="Validating")):
+        for batch_idx, (inputs, targets) in enumerate(loader):
             inputs, targets = inputs.to(device), targets.to(device)
             outputs = model(inputs)
             loss = criterion(outputs, targets)
@@ -170,30 +180,17 @@ def validate(model, loader, criterion, device):
             total += targets.size(0)
             correct += predicted.eq(targets).sum().item()
             
-            # Debug the first validation batch
-            if batch_idx == 0:
-                debug_batch(model, loader, device, criterion, batch_idx, "validation")
-    
-    # Calculate class-wise accuracy
-    class_correct = list(0. for _ in range(len(loader.dataset.classes)))
-    class_total = list(0. for _ in range(len(loader.dataset.classes)))
-    
-    with torch.no_grad():
-        for inputs, targets in loader:
-            inputs, targets = inputs.to(device), targets.to(device)
-            outputs = model(inputs)
-            _, predicted = torch.max(outputs, 1)
-            c = (predicted == targets).squeeze()
-            
+            # Track class-wise accuracy
             for i in range(targets.size(0)):
                 label = targets[i].item()
-                class_correct[label] += c[i].item()
+                class_correct[label] += (predicted[i] == targets[i]).item()
                 class_total[label] += 1
     
     # Print class-wise accuracy
     print("\nClass-wise accuracy:")
-    for i in range(len(loader.dataset.classes)):
-        print(f'Accuracy of {loader.dataset.classes[i]}: {100 * class_correct[i] / class_total[i]:.2f}%')
+    for i in range(num_classes):
+        print(f"  {loader.dataset.classes[i]}: {100 * class_correct[i] / max(1, class_total[i]):.2f}% "
+              f"({class_correct[i]}/{class_total[i]})")
     
     return val_loss/len(loader), 100.*correct/total
 
@@ -213,55 +210,53 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() and not args.no_gpu else "cpu")
     print(f"Using device: {device}")
     
-    # Load dataset
+    # Get dataset configs
+    dataset_config = DATASET_CONFIGS[args.dataset]
+    img_size = dataset_config['image_size']
+    
+    # Get memory and integration configs
+    memory_config = MEMORY_CONFIGS[args.memory_type]
+    integration_config = INTEGRATION_CONFIGS[args.approach]
+    
+    # Load dataset with adjusted num_workers
     print(f"Loading {args.dataset} dataset...")
     if args.dataset == 'cifar10':
-        train_loader, test_loader = get_cifar10_loaders(batch_size=args.batch_size)
-        num_classes = 10
+        train_loader, test_loader = get_cifar10_loaders(batch_size=args.batch_size, num_workers=args.num_workers, img_size=img_size)
     elif args.dataset == 'cifar100':
-        train_loader, test_loader = get_cifar100_loaders(batch_size=args.batch_size)
-        num_classes = 100
+        train_loader, test_loader = get_cifar100_loaders(batch_size=args.batch_size, num_workers=args.num_workers, img_size=img_size)
     elif args.dataset == 'tiny-imagenet':
-        train_loader, test_loader = get_tiny_imagenet_loaders(batch_size=args.batch_size)
-        num_classes = 200
+        train_loader, test_loader = get_tiny_imagenet_loaders(batch_size=args.batch_size, num_workers=args.num_workers, img_size=img_size)
     elif args.dataset == 'ants-bees':
-        train_loader, test_loader = get_ants_bees_loaders(batch_size=args.batch_size, num_workers=4)
-        num_classes = 2
+        train_loader, test_loader = get_ants_bees_loaders(batch_size=args.batch_size, num_workers=args.num_workers, img_size=img_size)
     elif args.dataset == 'imagenet':
-        train_loader, test_loader = get_imagenet_loaders(batch_size=args.batch_size)
-        num_classes = 1000
+        train_loader, test_loader = get_imagenet_loaders(batch_size=args.batch_size, num_workers=args.num_workers, img_size=img_size)
     
     # Print dataset statistics
     print(f"Training set size: {len(train_loader.dataset)}")
     print(f"Test set size: {len(test_loader.dataset)}")
-    print(f"Number of classes: {num_classes}")
+    print(f"Number of classes: {len(train_loader.dataset.classes)}")
     print(f"Class names: {train_loader.dataset.classes}")
     
-    # Create model
+    # Check class distribution
+    train_targets = [sample[1] for sample in train_loader.dataset]
+    class_counts = {}
+    for i, cls in enumerate(train_loader.dataset.classes):
+        class_counts[cls] = train_targets.count(i)
+    print(f"Class distribution in training set: {class_counts}")
+    
+    # Create model using factory function - EXACTLY as in test_mal_none.py
     print(f"Creating model: {args.model_size}-{args.approach}-{args.memory_type}")
-    if args.memory_type == 'none':
-        # Create base model directly for memory_type=none
-        if args.model_size == 'tiny':
-            model = ViTTiny(num_classes=num_classes, pretrained=not args.no_pretrained)
-        elif args.model_size == 'small':
-            model = ViTSmall(num_classes=num_classes, pretrained=not args.no_pretrained)
-        elif args.model_size == 'base':
-            model = ViTBase(num_classes=num_classes, pretrained=not args.no_pretrained)
-    else:
-        # Use factory function for models with memory
-        model = create_vit_with_memory(
-            model_size=args.model_size,
-            approach=args.approach,
-            memory_type=args.memory_type,
-            num_classes=num_classes,
-            pretrained=not args.no_pretrained
-        )
+    model = create_vit_with_memory(
+        model_size=args.model_size,
+        approach=args.approach,
+        memory_type=args.memory_type,
+        num_classes=dataset_config['num_classes'],
+        image_size=img_size,
+        pretrained=not args.no_pretrained,
+        **{**memory_config, **integration_config}
+    )
     
     model = model.to(device)
-    
-    # Define loss function and optimizer
-    criterion = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(model.parameters(), lr=args.lr)
     
     # Print model summary
     total_params = sum(p.numel() for p in model.parameters())
@@ -269,12 +264,18 @@ def main():
     print(f"Total parameters: {total_params:,}")
     print(f"Trainable parameters: {trainable_params:,}")
     
+    # Define loss function and optimizer
+    criterion = nn.CrossEntropyLoss()
+    optimizer = optim.Adam(model.parameters(), lr=args.lr)
+    
     # Training loop
     best_acc = 0
     start_time = time.time()
     
     # Check initial model predictions
     print("\nChecking initial model predictions...")
+    debug_batch(model, train_loader, device, criterion, "initial_train")
+    
     with torch.no_grad():
         initial_val_loss, initial_val_acc = validate(model, test_loader, criterion, device)
         print(f"Initial validation - Loss: {initial_val_loss:.4f}, Accuracy: {initial_val_acc:.2f}%")
@@ -285,6 +286,9 @@ def main():
         # Train
         train_loss, train_acc = train_epoch(model, train_loader, criterion, optimizer, device, epoch+1)
         epoch_train_time = time.time() - epoch_start
+        
+        # Debug a batch mid-training
+        debug_batch(model, train_loader, device, criterion, f"epoch_{epoch+1}")
         
         # Validate
         val_loss, val_acc = validate(model, test_loader, criterion, device)

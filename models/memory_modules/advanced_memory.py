@@ -125,7 +125,16 @@ class AdvancedNeuralMemory(nn.Module):
         self.mem_params = nn.ParameterDict()
         for name, param in self.memory_model.named_parameters():
             # Create a flattened version of the parameter
-            self.mem_params[name.replace('.', '_')] = nn.Parameter(param.clone())
+            param_name = name.replace('.', '_')
+            
+            if self.per_head_learned_parameters:
+                # For per-head parameters, expand with a head dimension (heads will be first dimension)
+                # Initialize by repeating the same values across all heads
+                heads_param = param.clone().unsqueeze(0).expand(self.heads, *param.shape)
+                self.mem_params[param_name] = nn.Parameter(heads_param)
+            else:
+                # Original behavior - single set of parameters
+                self.mem_params[param_name] = nn.Parameter(param.clone())
         
         # Projections for query/key/value
         self.to_queries = nn.Linear(self.memory_dim, self.memory_dim)
@@ -145,11 +154,16 @@ class AdvancedNeuralMemory(nn.Module):
         # For associative scan
         self.assoc_scan = AssocScan(use_accelerated=use_accelerated_scan)
         
-        # Memory state buffers - initialize them in forward pass
+        # Memory state buffers
         for name in self.mem_params:
             # Create momentum buffers for each parameter
             if momentum:
-                self.register_buffer(f'momentum_{name}', None, persistent=False)
+                if self.per_head_learned_parameters:
+                    # Initialize as None, will be created properly during first use
+                    self.register_buffer(f'momentum_{name}', None, persistent=False)
+                else:
+                    # Original behavior
+                    self.register_buffer(f'momentum_{name}', None, persistent=False)
         
         # Loss function for surprise computation
         self.store_memory_loss_fn = lambda pred, target: (pred - target).pow(2).mean(dim=-1)
@@ -192,20 +206,11 @@ class AdvancedNeuralMemory(nn.Module):
                     self.v_block_weights[-1] = 2.0             # Late block for values
     
     def compute_surprise(
-        self, 
-        keys: torch.Tensor, 
-        values: torch.Tensor
-    ) -> Dict[str, torch.Tensor]:
-        """
-        Compute surprise via gradient computation.
-        
-        Args:
-            keys: Key tensor of shape [batch, seq_len, memory_dim]
-            values: Value tensor of shape [batch, seq_len, memory_dim]
-            
-        Returns:
-            Dictionary of gradients for each parameter
-        """
+    self, 
+    keys: torch.Tensor,  # [batch*heads, seq_len, memory_dim]
+    values: torch.Tensor  # [batch*heads, seq_len, memory_dim]
+) -> Dict[str, torch.Tensor]:
+        """Compute surprise via gradient computation."""
         # Create inputs for gradient computation
         keys_for_grad = keys.detach().clone().requires_grad_(True)
         values_detached = values.detach()
@@ -240,19 +245,29 @@ class AdvancedNeuralMemory(nn.Module):
             for (name, param), grad_val in zip(self.memory_model.named_parameters(), grads):
                 param_name = name.replace('.', '_')
                 if grad_val is not None:
-                    # Negative for surprise (gradient descent direction)
-                    grad_dict[param_name] = -grad_val
+                    if self.per_head_learned_parameters:
+                        # Shape gradients for per-head parameters
+                        # This needs to match the shape in mem_params
+                        batch_head_size = keys.shape[0]
+                        # Reshape to add head dimension - this depends on how you've batched your inputs
+                        # Let's assume gradients should be reshaped to [heads, ...param_shape]
+                        grad_shaped = grad_val.unsqueeze(0)  # Add head dimension
+                        grad_dict[param_name] = -grad_shaped  # Negative for surprise
+                    else:
+                        # Original behavior
+                        grad_dict[param_name] = -grad_val
                 else:
-                    # Use zeros for params without gradients
-                    grad_dict[param_name] = torch.zeros_like(param)
-                    
+                    # Zero gradients for params without gradients
+                    if self.per_head_learned_parameters:
+                        grad_dict[param_name] = torch.zeros_like(self.mem_params[param_name])
+                    else:
+                        grad_dict[param_name] = torch.zeros_like(param)
         except Exception as e:
             print(f"Error computing surprise: {e}")
             # Fallback: create zero gradients
             grad_dict = {}
-            for name, param in self.memory_model.named_parameters():
-                param_name = name.replace('.', '_')
-                grad_dict[param_name] = torch.zeros_like(param)
+            for name in self.mem_params:
+                grad_dict[name] = torch.zeros_like(self.mem_params[name])
         
         finally:
             # Restore original states
@@ -265,12 +280,7 @@ class AdvancedNeuralMemory(nn.Module):
         return grad_dict
     
     def update_memory_params(self, surprise_grads: Dict[str, torch.Tensor]) -> None:
-        """
-        Update memory parameters with computed surprise gradients.
-        
-        Args:
-            surprise_grads: Dictionary of gradients for each parameter
-        """
+        """Update memory parameters with computed surprise gradients."""
         for name, param in self.mem_params.items():
             if name in surprise_grads:
                 # Apply momentum and update
@@ -285,7 +295,7 @@ class AdvancedNeuralMemory(nn.Module):
                         # Store new momentum
                         setattr(self, momentum_buffer_name, param_update.detach())
                     else:
-                        # Initialize momentum buffer
+                        # Initialize momentum buffer with correct shape
                         param_update = self.adaptive_lr * surprise_grads[name]
                         setattr(self, momentum_buffer_name, param_update.detach())
                 else:
@@ -294,10 +304,15 @@ class AdvancedNeuralMemory(nn.Module):
                 
                 # Update parameter
                 with torch.no_grad():
-                    # Apply forgetting/decay
-                    self.mem_params[name].mul_(1 - self.forget_factor)
-                    # Add update
-                    self.mem_params[name].add_(param_update)
+                    for name, param in self.memory_model.named_parameters():
+                        param_name = name.replace('.', '_')
+                        if param_name in self.mem_params:
+                            if self.per_head_learned_parameters:
+                                # Average across heads for the memory model parameters
+                                param.copy_(self.mem_params[param_name].mean(dim=0))
+                            else:
+                                # Original behavior
+                                param.copy_(self.mem_params[param_name])
     
     def forward(
         self, 
@@ -386,58 +401,63 @@ class AdvancedNeuralMemory(nn.Module):
         state: Optional[Dict[str, Any]] = None
     ) -> Tuple[torch.Tensor, Dict[str, Any]]:
         """
-        Forward pass using differentiated views from transformer blocks.
+        Forward pass using differentially weighted block outputs with per-head parameters.
         
         Args:
-            x: Input tensor of shape [batch, seq_len, dim]
+            x: Input tensor of shape [batch_size, seq_len, dim]
             block_outputs: List of outputs from transformer blocks
             state: Optional previous state
-            
+        
         Returns:
             Tuple of (updated tensor, updated state)
         """
         batch_size, seq_len, _ = x.shape
         
-        # Weight each block's output according to the learned weights
-        q_weights = F.softmax(self.q_block_weights, dim=0)
-        k_weights = F.softmax(self.k_block_weights, dim=0)
-        v_weights = F.softmax(self.v_block_weights, dim=0)
+        # Validate differentiated view configuration
+        if (not self.qkv_receives_diff_views or 
+            self.q_diff_view_weights is None or 
+            len(block_outputs) < 2 or 
+            not hasattr(self, 'heads')):
+            # Fallback to standard forward pass
+            return self.forward(x, state)
         
-        # Create weighted views
-        q_view = torch.zeros_like(block_outputs[0])
-        k_view = torch.zeros_like(block_outputs[0])
-        v_view = torch.zeros_like(block_outputs[0])
+        # Normalize block view weights to create a probability distribution
+        q_weights = F.softmax(self.q_diff_view_weights, dim=0)
+        k_weights = F.softmax(self.k_diff_view_weights, dim=0)
+        v_weights = F.softmax(self.v_diff_view_weights, dim=0)
+        
+        # Create per-head weighted block views
+        # Shape: [heads, batch_size, seq_len, dim]
+        q_view = torch.zeros(self.heads, batch_size, seq_len, block_outputs[0].shape[-1], 
+                            device=block_outputs[0].device)
+        k_view = torch.zeros_like(q_view)
+        v_view = torch.zeros_like(q_view)
         
         for i, block_out in enumerate(block_outputs):
-            q_view += q_weights[i] * block_out
-            k_view += k_weights[i] * block_out
-            v_view += v_weights[i] * block_out
+            # Distribute weights across heads
+            q_view += q_weights[i] * block_out.unsqueeze(0)
+            k_view += k_weights[i] * block_out.unsqueeze(0)
+            v_view += v_weights[i] * block_out.unsqueeze(0)
         
-        # Apply extra projections for each view
-        q_view = self.q_view_proj(q_view)
-        k_view = self.k_view_proj(k_view)
-        v_view = self.v_view_proj(v_view)
+        # Reshape for memory processing
+        # From [heads, batch_size, seq_len, dim] to [heads * batch_size, seq_len, dim]
+        q_mem = self.down_proj(q_view.reshape(-1, seq_len, q_view.shape[-1]))
+        k_mem = self.down_proj(k_view.reshape(-1, seq_len, k_view.shape[-1]))
+        v_mem = self.down_proj(v_view.reshape(-1, seq_len, v_view.shape[-1]))
         
-        # Project down to memory dimension
-        q_mem = self.down_proj(q_view)
-        k_mem = self.down_proj(k_view)
-        v_mem = self.down_proj(v_view)
-        
-        # Generate projections
+        # Generate projections for memory with per-head parameters
         queries = self.to_queries(q_mem)
         keys = self.to_keys(k_mem)
         values = self.to_values(v_mem)
         
+        # Optional normalization
         if self.qk_rmsnorm:
             queries = self.q_norm(queries)
             keys = self.k_norm(keys)
         
-        # Compute surprise and update memory
+        # Compute surprise and update memory parameters
         with torch.set_grad_enabled(True):
-            # Compute surprise gradients
             surprise_grads = self.compute_surprise(keys, values)
-            
-            # Update memory parameters
             self.update_memory_params(surprise_grads)
             
             # Copy updated parameters to memory model
@@ -445,30 +465,36 @@ class AdvancedNeuralMemory(nn.Module):
                 for name, param in self.memory_model.named_parameters():
                     param_name = name.replace('.', '_')
                     if param_name in self.mem_params:
-                        param.copy_(self.mem_params[param_name])
+                        if self.per_head_learned_parameters:
+                            # Average across heads for the memory model parameters
+                            param.copy_(self.mem_params[param_name].mean(dim=0))
+                        else:
+                            param.copy_(self.mem_params[param_name])
         
         # Process through memory model
-        memory_output = self.memory_model(queries)
+        # Use per-head parameters if configured
+        if self.per_head_learned_parameters:
+            # Use per-head memory parameters
+            memory_output = torch.stack([
+                self.memory_model(queries[i*batch_size:(i+1)*batch_size]) 
+                for i in range(self.heads)
+            ])
+            # Average across heads
+            memory_output = memory_output.mean(dim=0)
+        else:
+            # Standard processing
+            memory_output = self.memory_model(queries)
         
         # Project back to original dimension
         output = self.up_proj(memory_output)
         
-        # Create next state information
-        if state is None:
-            next_state = {
-                'seq_index': seq_len,
-                'weights': {k: v.detach() for k, v in self.mem_params.items()},
-                'momentum': {f'momentum_{k}': getattr(self, f'momentum_{k}', None) 
-                             for k in self.mem_params.keys() if hasattr(self, f'momentum_{k}')}
-            }
-        else:
-            # Update state with new sequence length
-            next_state = {
-                'seq_index': state.get('seq_index', 0) + seq_len,
-                'weights': {k: v.detach() for k, v in self.mem_params.items()},
-                'momentum': {f'momentum_{k}': getattr(self, f'momentum_{k}', None) 
-                             for k in self.mem_params.keys() if hasattr(self, f'momentum_{k}')}
-            }
+        # Prepare state information
+        next_state = {
+            'seq_index': state.get('seq_index', 0) + seq_len if state else seq_len,
+            'weights': {k: v.detach() for k, v in self.mem_params.items()},
+            'momentum': {f'momentum_{k}': getattr(self, f'momentum_{k}', None) 
+                        for k in self.mem_params.keys() if hasattr(self, f'momentum_{k}')}
+        }
         
         return output, next_state
     
