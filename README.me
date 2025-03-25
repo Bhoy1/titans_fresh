@@ -1,0 +1,112 @@
+# Titans-ViT: Vision Transformers with Neural Memory
+
+This repository contains the implementation of various memory-augmented Vision Transformer (ViT) architectures. It integrates pretrained Vision Transformers with neural memory modules using different integration approaches.
+
+## Features
+
+- Three types of neural memory modules:
+  - Simple MLP memory 
+  - Simple Neural Memory (with momentum and forgetting)
+  - Advanced Neural Memory (with differentiated QKV, gradient-based surprise)
+
+- Three integration approaches:
+  - Memory as Layer (MAL) - Inserts memory between transformer blocks
+  - Memory as Context (MAC) - Adds memory tokens as context to the sequence
+  - Memory as Gate (MAG) - Uses memory as an alternative path with learned gating
+
+- Pretrained model support:
+  - ViT-Tiny (pretrained)
+  - ViT-Small (pretrained)
+  - ViT-Base (pretrained)
+
+- Configurable training pipeline:
+  - Two-phase training (first train memory, then fine-tune backbone)
+  - Mixed precision training
+  - Automatic handling of different image sizes
+
+## Installation
+
+```bash
+git clone https://github.com/yourusername/titans-vit.git
+cd titans-vit
+pip install -r requirements.txt
+```
+
+## Usage
+
+### Training a Single Model
+
+```bash
+python train.py --dataset cifar100 --model-size tiny --approach mag --memory-type advanced --batch-size 64 --epochs 30
+```
+
+### Training Multiple Models
+
+```bash
+python run.py --dataset cifar100 --model-sizes tiny,small --approaches mal,mac,mag --memory-types mlp,simple,advanced
+```
+
+### Evaluating a Model
+
+```bash
+python evaluate.py --checkpoint path/to/checkpoint.pth --visualize
+```
+
+## Configuration
+
+Configuration files are stored in the `configs` directory. You can modify the default configurations in `default_configs.py`.
+
+## Project Structure
+
+```
+titans-vit/
+├── models/
+│   ├── base_models.py               # Pretrained ViT implementations
+│   ├── memory_modules/
+│   │   ├── memory_mlp.py            # Simple MLP memory
+│   │   ├── simple_memory.py         # Simple neural memory
+│   │   └── advanced_memory.py       # Advanced neural memory
+│   ├── integration/
+│   │   ├── mal.py                   # Memory as Layer models
+│   │   ├── mac.py                   # Memory as Context models
+│   │   └── mag.py                   # Memory as Gate models
+│   └── model_factory.py             # Factory to create models
+├── data/
+│   └── data_loading.py              # Dataset loading utilities
+├── utils/
+│   └── training.py                  # Training and evaluation utilities
+├── configs/
+│   └── default_configs.py           # Default configurations
+├── train.py                         # Main training script
+├── evaluate.py                      # Model evaluation script
+└── run.py                           # Script to run multiple experiments
+```
+
+## Command Line Arguments
+
+### train.py
+
+- `--dataset`: Dataset to use (cifar10, cifar100, tiny-imagenet, ants-bees, imagenet)
+- `--model-size`: Size of the ViT model (tiny, small, base)
+- `--approach`: Memory integration approach (mal, mac, mag)
+- `--memory-type`: Type of memory module (mlp, simple, advanced)
+- `--batch-size`: Input batch size for training
+- `--epochs`: Number of epochs to train
+- `--qkv-diff-views`: Use different views for QKV in advanced memory
+
+### run.py
+
+- `--dataset`: Dataset to use
+- `--model-sizes`: Comma-separated list of model sizes to run
+- `--approaches`: Comma-separated list of approaches to run
+- `--memory-types`: Comma-separated list of memory types to run
+
+### evaluate.py
+
+- `--checkpoint`: Path to model checkpoint
+- `--batch-size`: Batch size for evaluation
+- `--visualize`: Visualize confusion matrix and per-class accuracy
+
+## Acknowledgements
+
+This implementation uses pretrained Vision Transformer models from the [timm](https://github.com/huggingface/pytorch-image-models) library.
